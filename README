@@ -1,0 +1,13 @@
+http-redirect -- A minimalist HTTP server redirecting to another address
+
+  This program is designed to use as little memory as possible. Each time it
+receives an HTTP request, it will send back a 301 redirect to the specified
+address.
+
+  It is intended to be run on machines that are not supposed to act as HTTP
+servers (for instance, if example.com is not the same machine as
+www.example.com and example.com doesn't run an HTTP server, you might want to
+setup http-redirect on it).
+
+  Example usage:
+    http-redirect -p 80 http://www.google.com/

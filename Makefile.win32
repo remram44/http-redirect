@@ -1,0 +1,20 @@
+CC=gcc
+RM=del /F
+CFLAGS=-g -Wall -O2
+LIBS=-lws2_32
+
+.PHONY: all clean
+
+all: http-redirect.exe
+
+# Links the final binary
+http-redirect.exe: http-redirect.o
+	$(CC) -o $@ $(CFLAGS) http-redirect.o $(LIBS)
+
+# Compile a .c into a .o
+%.o: %.c
+	$(CC) -c -o $@ $(CFLAGS) $<
+
+# Clean up object files
+clean:
+	$(RM) *.o

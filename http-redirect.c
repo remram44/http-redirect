@@ -1,0 +1,302 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifdef __WIN32__
+    #include <winsock2.h>
+
+    typedef int socklen_t;
+#else
+    #include <sys/types.h>
+    #include <sys/socket.h>
+    #include <sys/param.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <signal.h>
+    #include <netdb.h>
+    #include <errno.h>
+    #include <unistd.h>
+
+    typedef int SOCKET;
+#endif
+
+#ifndef MAX_PENDING_REQUESTS
+    #define MAX_PENDING_REQUESTS 16
+#endif
+
+#ifndef RECV_BUFFER_SIZE
+    #define RECV_BUFFER_SIZE 4096
+#endif
+
+int setup_server(int *serv_sock, int port);
+int serve(int serv_sock, const char *dest);
+
+void pack_array(void **array, size_t size)
+{
+    size_t src, dest = 0;
+    for(src = 0; src < size; ++src)
+        if(array[src] != NULL)
+            array[dest++] = array[src];
+    for(; dest < size; ++dest)
+        array[dest] = NULL;
+}
+
+void my_closesocket(int sock)
+{
+#ifdef __WIN32__
+    closesocket(sock);
+#else
+    shutdown(sock, SHUT_RDWR);
+    close(sock);
+#endif
+}
+
+void print_help(FILE *f)
+{
+    fprintf(
+            f,
+            "Usage: http-redirect [options] <destination>\n"
+            "\n"
+            "  Starts a very simple HTTP server that will always send back 301 "
+            "redirects to\n"
+            "the specified destination.\n"
+            "  Example:\n"
+            "    http-redirect -p 80 http://www.google.com/\n"
+            "\n"
+            "Recognized options:\n"
+            "  -h, --help: print this message and exit\n"
+            "  -p, --port <port>: port on which to listen\n");
+}
+
+int main(int argc, char **argv)
+{
+    int port = -1;
+    const char *dest = NULL;
+    /* TODO : bind to a specific interface */
+    while(*(++argv) != NULL)
+    {
+        if(strcmp(*argv, "-h") == 0 || strcmp(*argv, "--help") == 0)
+        {
+            print_help(stdout);
+            return 0;
+        }
+        else if(strcmp(*argv, "-p") == 0 || strcmp(*argv, "--port") == 0)
+        {
+            char *endptr;
+            if(port != -1)
+            {
+                fprintf(stderr, "Error: --port was passed multiple times\n");
+                return 1;
+            }
+            if(*(++argv) == NULL)
+            {
+                fprintf(stderr, "Error: missing argument for --port\n");
+                return 1;
+            }
+            port = strtol(*argv, &endptr, 10);
+            if(endptr == *argv || *endptr != '\0')
+            {
+                fprintf(stderr, "Error: invalid value for --port\n");
+                return 1;
+            }
+        }
+        else
+        {
+            if(dest != NULL)
+            {
+                fprintf(stderr, "Error: multiple destinations specified\n");
+                return 1;
+            }
+            dest = *argv;
+        }
+    }
+
+    if(port == -1)
+        port = 80;
+
+    if(dest == NULL)
+    {
+        fprintf(stderr, "Error: no destination specified\n");
+        return 1;
+    }
+
+#ifdef __WIN32__
+    {
+        /* Initializes WINSOCK */
+        WSADATA wsa;
+        if(WSAStartup(MAKEWORD(1, 1), &wsa) != 0)
+        {
+            fprintf(stderr, "Error: can't initialize WINSOCK\n");
+            return 3;
+        }
+    }
+#endif
+
+    {
+        int serv_sock;
+
+        /* Poor man's exception handling... */
+        int ret = setup_server(&serv_sock, port);
+        if(ret != 0)
+            return ret;
+
+        ret = serve(serv_sock, dest);
+        my_closesocket(serv_sock);
+        return ret;
+    }
+}
+
+int setup_server(int *serv_sock, int port)
+{
+    struct sockaddr_in sin;
+
+    *serv_sock = socket(AF_INET, SOCK_STREAM, 0);
+
+    sin.sin_addr.s_addr = INADDR_ANY;
+    sin.sin_family = AF_INET;
+    sin.sin_port = htons(port);
+
+    if(bind(*serv_sock, (struct sockaddr*)&sin, sizeof(sin)) == -1)
+    {
+        fprintf(stderr, "Error: can't grab port %d with bind: ", port);
+        perror("");
+        return 2;
+    }
+    if(listen(*serv_sock, 5) == -1)
+    {
+        perror("Error: can't listen for incoming connections: ");
+        return 2;
+    }
+
+    return 0;
+}
+
+char *build_redirect(const char *dest, size_t *response_size)
+{
+    const char *pattern =
+            "HTTP/1.1 301 Moved Permanently\r\n"
+            "Location: %s\r\n"
+            "Server: http-redirect\r\n"
+            "\r\n";
+    char *response;
+    *response_size = strlen(pattern) - 2 + strlen(dest);
+    response = malloc(*response_size + 1);
+    snprintf(response, *response_size + 1, pattern, dest);
+
+    return response;
+}
+
+struct Client {
+    int sock;
+    int state;
+};
+
+int serve(int serv_sock, const char *dest)
+{
+    size_t response_size;
+    char *response_data = build_redirect(dest, &response_size);
+
+    struct Client *connections[MAX_PENDING_REQUESTS];
+    size_t i;
+    for(i = 0; i < MAX_PENDING_REQUESTS; ++i)
+        connections[i] = NULL;
+
+    while(1)
+    {
+        int greatest;
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET((SOCKET)serv_sock, &fds);
+        greatest = serv_sock;
+
+        for(i = 0; i < MAX_PENDING_REQUESTS && connections[i] != NULL; ++i)
+        {
+            int s = connections[i]->sock;
+            FD_SET((SOCKET)s, &fds);
+            if(s > greatest)
+                greatest = s;
+        }
+
+        select(greatest + 1, &fds, NULL, NULL, NULL);
+
+        if(FD_ISSET(serv_sock, &fds))
+        {
+            /* If all connections are taken */
+            if(connections[MAX_PENDING_REQUESTS - 1] != NULL)
+            {
+                my_closesocket(connections[0]->sock);
+                free(connections[0]);
+                connections[0] = NULL;
+                pack_array((void**)connections, MAX_PENDING_REQUESTS);
+            }
+            /* Accept the new connection */
+            {
+                struct sockaddr_in clientsin;
+                socklen_t size = sizeof(clientsin);
+                int sock = accept(serv_sock,
+                                  (struct sockaddr*)&clientsin, &size);
+                if(sock != -1)
+                {
+                    for(i = 0; i < MAX_PENDING_REQUESTS; ++i)
+                        if(connections[i] == NULL)
+                            break;
+                    connections[i] = malloc(sizeof(struct Client));
+                    connections[i]->sock = sock;
+                    connections[i]->state = 0;
+                }
+            }
+        }
+        else for(i = 0; i < MAX_PENDING_REQUESTS && connections[i] != NULL; ++i)
+        {
+            int s = connections[i]->sock;
+            if(FD_ISSET(s, &fds))
+            {
+                int *const state = &connections[i]->state;
+                size_t j;
+                /* Read stuff */
+                static char buffer[RECV_BUFFER_SIZE];
+                int len = recv(s, buffer, RECV_BUFFER_SIZE, 0);
+
+                /* Decode HTTP request (really just wait for "\r\n\r\n") */
+                for(j = 0; j < len; ++j)
+                {
+                    if(buffer[j] == '\r')
+                    {
+                        if(*state == 0 || *state == 2)
+                            ++*state;
+                        else
+                            *state = 1;
+                    }
+                    else if(buffer[j] == '\n')
+                    {
+                        if(*state < 2)
+                            *state = 2;
+                        else
+                        {
+                            *state = 4;
+                            break;
+                        }
+                    }
+                    else
+                        *state = 0;
+                }
+                if(*state == 4)
+                    /* Print redirect */
+                    send(s, response_data, response_size, 0);
+
+                /* Client closed the connection OR request complete */
+                if(len <= 0 || *state == 4)
+                {
+                    my_closesocket(s);
+                    free(connections[i]);
+                    connections[i] = NULL;
+                    pack_array((void**)connections, MAX_PENDING_REQUESTS);
+                }
+            }
+        }
+    }
+
+    free(response_data);
+
+    return 0;
+}
