@@ -28,7 +28,7 @@
     #define RECV_BUFFER_SIZE 4096
 #endif
 
-int setup_server(int *serv_sock, int port);
+int setup_server(int *serv_sock, const char *addr, const char *port);
 int serve(int serv_sock, const char *dest);
 
 void pack_array(void **array, size_t size)
@@ -73,12 +73,12 @@ void print_help(FILE *f)
 
 int main(int argc, char **argv)
 {
-    int port = -1;
+    const char *bind_addr = NULL;
+    const char *port = NULL;
     const char *dest = NULL;
 #ifndef __WIN32__
     int daemonize = 0;
 #endif
-    /* TODO : bind to a specific interface */
     while(*(++argv) != NULL)
     {
         if(strcmp(*argv, "-h") == 0 || strcmp(*argv, "--help") == 0)
@@ -86,10 +86,23 @@ int main(int argc, char **argv)
             print_help(stdout);
             return 0;
         }
+        else if(strcmp(*argv, "-b") == 0 || strcmp(*argv, "--bind") == 0)
+        {
+            if(bind_addr != NULL)
+            {
+                fprintf(stderr, "Error: --bind was passed multiple times\n");
+                return 1;
+            }
+            if(*(++argv) == NULL)
+            {
+                fprintf(stderr, "Error: missing argument for --bind\n");
+                return 1;
+            }
+            bind_addr = *argv;
+        }
         else if(strcmp(*argv, "-p") == 0 || strcmp(*argv, "--port") == 0)
         {
-            char *endptr;
-            if(port != -1)
+            if(port != NULL)
             {
                 fprintf(stderr, "Error: --port was passed multiple times\n");
                 return 1;
@@ -99,12 +112,7 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Error: missing argument for --port\n");
                 return 1;
             }
-            port = strtol(*argv, &endptr, 10);
-            if(endptr == *argv || *endptr != '\0')
-            {
-                fprintf(stderr, "Error: invalid value for --port\n");
-                return 1;
-            }
+            port = *argv;
         }
         else if(strcmp(*argv, "-d") == 0 || strcmp(*argv, "--daemon") == 0)
         {
@@ -126,8 +134,8 @@ int main(int argc, char **argv)
         }
     }
 
-    if(port == -1)
-        port = 80;
+    if(port == NULL)
+        port = "80";
 
     if(dest == NULL)
     {
@@ -173,7 +181,7 @@ int main(int argc, char **argv)
         int serv_sock;
 
         /* Poor man's exception handling... */
-        int ret = setup_server(&serv_sock, port);
+        int ret = setup_server(&serv_sock, bind_addr, port);
         if(ret != 0)
             return ret;
 
@@ -183,22 +191,47 @@ int main(int argc, char **argv)
     }
 }
 
-int setup_server(int *serv_sock, int port)
+int setup_server(int *serv_sock, const char *addr, const char *port)
 {
-    struct sockaddr_in sin;
-
-    *serv_sock = socket(AF_INET, SOCK_STREAM, 0);
-
-    sin.sin_addr.s_addr = INADDR_ANY;
-    sin.sin_family = AF_INET;
-    sin.sin_port = htons(port);
-
-    if(bind(*serv_sock, (struct sockaddr*)&sin, sizeof(sin)) == -1)
+    int ret;
+    struct addrinfo hints, *results, *rp;
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    hints.ai_protocol = 0;
+    hints.ai_canonname = NULL;
+    hints.ai_addr = NULL;
+    hints.ai_next = NULL;
+    ret = getaddrinfo(addr, port, &hints, &results);
+    if(ret != 0)
     {
-        fprintf(stderr, "Error: can't grab port %d with bind: ", port);
-        perror("");
+        fprintf(stderr, "Error: getaddrinfo failed: %s\n", gai_strerror(ret));
+        return 1;
+    }
+
+    for(rp = results; rp != NULL; rp = rp->ai_next)
+    {
+        *serv_sock = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if(*serv_sock == -1)
+            continue;
+
+        if(bind(*serv_sock, rp->ai_addr, rp->ai_addrlen) != -1)
+            break;
+
+        my_closesocket(*serv_sock);
+    }
+
+    freeaddrinfo(results);
+
+    if(rp == NULL)
+    {
+        fprintf(stderr, "Could not bind to %s:%s\n",
+                ((addr == NULL)?"*":addr), port);
+        *serv_sock = -1;
         return 2;
     }
+
     if(listen(*serv_sock, 5) == -1)
     {
         perror("Error: can't listen for incoming connections: ");
