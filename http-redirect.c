@@ -65,6 +65,9 @@ void print_help(FILE *f)
             "\n"
             "Recognized options:\n"
             "  -h, --help: print this message and exit\n"
+#ifndef __WIN32__
+            "  -d, --daemon: use fork() to daemonize (not on Windows)\n"
+#endif
             "  -p, --port <port>: port on which to listen\n");
 }
 
@@ -72,6 +75,9 @@ int main(int argc, char **argv)
 {
     int port = -1;
     const char *dest = NULL;
+#ifndef __WIN32__
+    int daemonize = 0;
+#endif
     /* TODO : bind to a specific interface */
     while(*(++argv) != NULL)
     {
@@ -100,6 +106,15 @@ int main(int argc, char **argv)
                 return 1;
             }
         }
+        else if(strcmp(*argv, "-d") == 0 || strcmp(*argv, "--daemon") == 0)
+        {
+#ifdef __WIN32__
+            fprintf(stderr, "Error: --daemon is not available on Windows\n");
+            return 1;
+#else
+            daemonize = 1;
+#endif
+        }
         else
         {
             if(dest != NULL)
@@ -119,6 +134,28 @@ int main(int argc, char **argv)
         fprintf(stderr, "Error: no destination specified\n");
         return 1;
     }
+
+#ifndef __WIN32__
+    if(daemonize)
+    {
+        switch(fork())
+        {
+        case -1:
+            perror("Error: fork() failed");
+            break;
+        case 0:
+            /* child: go on... */
+            fclose(stdin);
+            fclose(stdout);
+            fclose(stderr);
+            break;
+        default:
+            /* parent: exit with success */
+            return 0;
+            break;
+        }
+    }
+#endif
 
 #ifdef __WIN32__
     {
