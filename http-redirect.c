@@ -1,3 +1,26 @@
+/* Optionnal features */
+#ifndef __WIN32__
+    #ifndef ENABLE_FORK
+        #ifndef DISABLE_FORK
+            #define ENABLE_FORK
+        #endif
+    #endif
+#else
+    #ifdef ENABLE_FORK
+        #warning ENABLE_FORK is not available on Windows
+        #undef ENABLE_FORK
+    #endif
+#endif
+
+/* Configuration */
+#ifndef MAX_PENDING_REQUESTS
+    #define MAX_PENDING_REQUESTS 16
+#endif
+
+#ifndef RECV_BUFFER_SIZE
+    #define RECV_BUFFER_SIZE 512
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,14 +43,6 @@
     #include <unistd.h>
 
     typedef int SOCKET;
-#endif
-
-#ifndef MAX_PENDING_REQUESTS
-    #define MAX_PENDING_REQUESTS 16
-#endif
-
-#ifndef RECV_BUFFER_SIZE
-    #define RECV_BUFFER_SIZE 4096
 #endif
 
 int setup_server(int *serv_sock, const char *addr, const char *port);
@@ -67,8 +82,8 @@ void print_help(FILE *f)
             "\n"
             "Recognized options:\n"
             "  -h, --help: print this message and exit\n"
-#ifndef __WIN32__
-            "  -d, --daemon: use fork() to daemonize (not on Windows)\n"
+#ifndef ENABLE_FORK
+            "  -d, --daemon: use fork() to daemonize\n"
 #endif
             "  -p, --port <port>: port on which to listen\n");
 }
@@ -78,7 +93,7 @@ int main(int argc, char **argv)
     const char *bind_addr = NULL;
     const char *port = NULL;
     const char *dest = NULL;
-#ifndef __WIN32__
+#ifdef ENABLE_FORK
     int daemonize = 0;
 #endif
 
@@ -120,11 +135,11 @@ int main(int argc, char **argv)
         }
         else if(strcmp(*argv, "-d") == 0 || strcmp(*argv, "--daemon") == 0)
         {
-#ifdef __WIN32__
-            fprintf(stderr, "Error: --daemon is not available on Windows\n");
-            return 1;
-#else
+#ifdef ENABLE_FORK
             daemonize = 1;
+#else
+            fprintf(stderr, "Error: --daemon is not available\n");
+            return 1;
 #endif
         }
         else
@@ -147,28 +162,6 @@ int main(int argc, char **argv)
         return 1;
     }
 
-#ifndef __WIN32__
-    if(daemonize)
-    {
-        switch(fork())
-        {
-        case -1:
-            perror("Error: fork() failed");
-            break;
-        case 0:
-            /* child: go on... */
-            fclose(stdin);
-            fclose(stdout);
-            fclose(stderr);
-            break;
-        default:
-            /* parent: exit with success */
-            return 0;
-            break;
-        }
-    }
-#endif
-
 #ifdef __WIN32__
     {
         /* Initializes WINSOCK */
@@ -188,6 +181,28 @@ int main(int argc, char **argv)
         int ret = setup_server(&serv_sock, bind_addr, port);
         if(ret != 0)
             return ret;
+
+#ifdef ENABLE_FORK
+        if(daemonize)
+        {
+            switch(fork())
+            {
+            case -1:
+                perror("Error: fork() failed");
+                break;
+            case 0:
+                /* child: go on... */
+                fclose(stdin);
+                fclose(stdout);
+                fclose(stderr);
+                break;
+            default:
+                /* parent: exit with success */
+                return 0;
+                break;
+            }
+        }
+#endif
 
         ret = serve(serv_sock, dest);
         my_closesocket(serv_sock);
