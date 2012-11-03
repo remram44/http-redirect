@@ -79,6 +79,8 @@ int main(int argc, char **argv)
 #ifndef __WIN32__
     int daemonize = 0;
 #endif
+
+    (void)argc; /* unused */
     while(*(++argv) != NULL)
     {
         if(strcmp(*argv, "-h") == 0 || strcmp(*argv, "--help") == 0)
@@ -234,7 +236,7 @@ int setup_server(int *serv_sock, const char *addr, const char *port)
 
     if(listen(*serv_sock, 5) == -1)
     {
-        perror("Error: can't listen for incoming connections: ");
+        perror("Error: can't listen for incoming connections");
         return 2;
     }
 
@@ -322,7 +324,7 @@ int serve(int serv_sock, const char *dest)
             if(FD_ISSET(s, &fds))
             {
                 int *const state = &connections[i]->state;
-                size_t j;
+                int j;
                 /* Read stuff */
                 static char buffer[RECV_BUFFER_SIZE];
                 int len = recv(s, buffer, RECV_BUFFER_SIZE, 0);

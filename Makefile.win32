@@ -1,6 +1,6 @@
 CC=gcc
 RM=del /F
-CFLAGS=-g -Wall -O2
+CFLAGS=-W -Wall -Wextra -pedantic -O2
 LIBS=-lws2_32
 
 .PHONY: all clean

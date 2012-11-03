@@ -1,6 +1,6 @@
 CC=gcc
 RM=rm -f
-CFLAGS=-g -Wall -O2
+CFLAGS=-W -Wall -Wextra -pedantic -O2
 
 .PHONY: all clean
 
