@@ -5,10 +5,19 @@
             #define ENABLE_FORK
         #endif
     #endif
+    #ifndef ENABLE_CHGUSER
+        #ifndef DISABLE_CHGUSER
+            #define ENABLE_CHGUSER
+        #endif
+    #endif
 #else
     #ifdef ENABLE_FORK
         #warning ENABLE_FORK is not available on Windows
         #undef ENABLE_FORK
+    #endif
+    #ifdef ENABLE_CHGUSER
+        #warning ENABLE_CHGUSER is not available on Windows
+        #undef ENABLE_CHGUSER
     #endif
 #endif
 
@@ -43,6 +52,10 @@
     #include <unistd.h>
 
     typedef int SOCKET;
+#endif
+
+#ifdef ENABLE_CHGUSER
+    #include <pwd.h>
 #endif
 
 int setup_server(int *serv_sock, const char *addr, const char *port);
@@ -85,6 +98,9 @@ void print_help(FILE *f)
 #ifndef ENABLE_FORK
             "  -d, --daemon: use fork() to daemonize\n"
 #endif
+#ifndef ENABLE_CHGUSER
+            "  -u, --user: change to user after binding the socket\n"
+#endif
             "  -p, --port <port>: port on which to listen\n");
 }
 
@@ -95,6 +111,9 @@ int main(int argc, char **argv)
     const char *dest = NULL;
 #ifdef ENABLE_FORK
     int daemonize = 0;
+#endif
+#ifdef ENABLE_CHGUSER
+    const char *user = NULL;
 #endif
 
     (void)argc; /* unused */
@@ -142,6 +161,25 @@ int main(int argc, char **argv)
             return 1;
 #endif
         }
+        else if(strcmp(*argv, "-u") == 0 || strcmp(*argv, "--user") == 0)
+        {
+#ifdef ENABLE_CHGUSER
+            if(user != NULL)
+            {
+                fprintf(stderr, "Error: --user was passed multiple times\n");
+                return 1;
+            }
+            if(*(++argv) == NULL)
+            {
+                fprintf(stderr, "Error: missing argument for --user\n");
+                return 1;
+            }
+            user = *argv;
+#else
+            fprintf(stderr, "Error: --user is not available\n");
+            return 1;
+#endif
+        }
         else
         {
             if(dest != NULL)
@@ -181,6 +219,23 @@ int main(int argc, char **argv)
         int ret = setup_server(&serv_sock, bind_addr, port);
         if(ret != 0)
             return ret;
+
+#ifdef ENABLE_CHGUSER
+        if(user != NULL)
+        {
+            struct passwd *pwd = getpwnam(user);
+            if(pwd == NULL)
+            {
+                fprintf(stderr, "Error: user %s is unknown\n", user);
+                return 2;
+            }
+            if(setresuid(pwd->pw_uid, pwd->pw_uid, pwd->pw_uid) == -1)
+            {
+                fprintf(stderr, "Error: can't change user to %s\n", user);
+                return 2;
+            }
+        }
+#endif
 
 #ifdef ENABLE_FORK
         if(daemonize)
