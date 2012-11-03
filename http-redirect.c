@@ -3,7 +3,9 @@
 #include <string.h>
 
 #ifdef __WIN32__
+    #define _WIN32_WINNT 0x0501 /* needed for getaddrinfo(); means WinXP */
     #include <winsock2.h>
+    #include <ws2tcpip.h>
 
     typedef int socklen_t;
 #else
