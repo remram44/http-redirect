@@ -1,4 +1,4 @@
-/* Optionnal features */
+/* Optional features */
 #ifndef __WIN32__
     #ifndef ENABLE_FORK
         #ifndef DISABLE_FORK
@@ -20,6 +20,7 @@
         #undef ENABLE_CHGUSER
     #endif
 #endif
+/* ENABLE_REGEX: not enabled by default */
 
 /* Configuration */
 #ifndef MAX_PENDING_REQUESTS
@@ -54,12 +55,29 @@
     typedef int SOCKET;
 #endif
 
+#ifdef ENABLE_REGEX
+    #include <sys/types.h>
+    #include <regex.h>
+#endif
+
 #ifdef ENABLE_CHGUSER
     #include <pwd.h>
 #endif
 
+#ifdef ENABLE_REGEX
+struct regex {
+    regex_t preg;
+    const char *dest;
+    struct regex *next;
+};
+#endif
+
 int setup_server(int *serv_sock, const char *addr, const char *port);
-int serve(int serv_sock, const char *dest);
+int serve(int serv_sock, const char *dest
+#ifdef ENABLE_REGEX
+        , struct regex *regexes
+#endif
+        );
 
 void pack_array(void **array, size_t size)
 {
@@ -83,9 +101,14 @@ void my_closesocket(int sock)
 
 void print_help(FILE *f)
 {
-    fprintf(
-            f,
+    fprintf(f,
+            "%s%s",
+#ifdef ENABLE_REGEX
+            "Usage: http-redirect [options] [-r <regex1> <dest1> [...]] "
+            "<default_dest>\n"
+#else
             "Usage: http-redirect [options] <destination>\n"
+#endif
             "\n"
             "  Starts a very simple HTTP server that will always send back 301 "
             "redirects to\n"
@@ -94,12 +117,22 @@ void print_help(FILE *f)
             "    http-redirect -p 80 http://www.google.com/\n"
             "\n"
             "Recognized options:\n"
-            "  -h, --help: print this message and exit\n"
+            "  -h, --help: print this message and exit\n",
+#ifdef ENABLE_REGEX
+            "  -r, --regex <regex> <dest>: use destination if the request "
+            "matches the\nregular expression. Can be specified multiple "
+            "times; regex are tested in order.\nIf no regex matches, the "
+            "default destination is used.\n"
+            "The regex is matched against {HOST}{URI}, for example\n"
+            "\"google.com/search\"\n"
+            "  -e, --eregex <regex> <dest>: same thing, using extended "
+            "regular expressions.\n"
+#endif
 #ifndef ENABLE_FORK
             "  -d, --daemon: use fork() to daemonize\n"
 #endif
 #ifndef ENABLE_CHGUSER
-            "  -u, --user: change to user after binding the socket\n"
+            "  -u, --user <name>: change to user after binding the socket\n"
 #endif
             "  -p, --port <port>: port on which to listen\n");
 }
@@ -109,6 +142,9 @@ int main(int argc, char **argv)
     const char *bind_addr = NULL;
     const char *port = NULL;
     const char *dest = NULL;
+#ifdef ENABLE_REGEX
+    struct regex *regexes = NULL, *regexes_tail = NULL; /* not free'd */
+#endif
 #ifdef ENABLE_FORK
     int daemonize = 0;
 #endif
@@ -151,6 +187,51 @@ int main(int argc, char **argv)
                 return 1;
             }
             port = *argv;
+        }
+        else if(strcmp(*argv, "-r") == 0 || strcmp(*argv, "--regex") == 0
+             || strcmp(*argv, "-e") == 0 || strcmp(*argv, "--eregex") == 0)
+        {
+#ifdef ENABLE_REGEX
+            struct regex *new_reg = malloc(sizeof(struct regex));
+            char extended = ((*argv)[1] == '-')?
+                    ((*argv)[2] == 'e'):
+                    ((*argv)[1] == 'e');
+            int res;
+            if(*(++argv) == NULL)
+            {
+                fprintf(stderr,
+                        "Error: missing regular expression for --(e)regex\n");
+                return 1;
+            }
+            res = regcomp(
+                    &new_reg->preg,
+                    *argv,
+                    REG_NOSUB | (extended?REG_EXTENDED:0));
+            if(res != 0)
+            {
+                size_t errsize = regerror(res, &new_reg->preg, NULL, 0);
+                char *err = malloc(errsize); /* not free'd */
+                regerror(res, &new_reg->preg, err, errsize);
+                fprintf(stderr, "Error compiling regular expression: %s\n",
+                        err);
+                return 2;
+            }
+            if(*(++argv) == NULL)
+            {
+                fprintf(stderr, "Error: missing destination for --regex\n");
+                return 1;
+            }
+            new_reg->dest = *argv;
+            if(regexes_tail != NULL)
+                regexes_tail->next = new_reg;
+            else
+                regexes = new_reg;
+            new_reg->next = NULL;
+            regexes_tail = new_reg;
+#else
+            fprintf(stderr, "Error: --(e)regex is not available\n");
+            return 1;
+#endif
         }
         else if(strcmp(*argv, "-d") == 0 || strcmp(*argv, "--daemon") == 0)
         {
@@ -259,7 +340,13 @@ int main(int argc, char **argv)
         }
 #endif
 
-        ret = serve(serv_sock, dest);
+        ret = serve(
+                serv_sock,
+                dest
+#ifdef ENABLE_REGEX
+                , regexes
+#endif
+                );
         my_closesocket(serv_sock);
         return ret;
     }
@@ -335,7 +422,11 @@ struct Client {
     int state;
 };
 
-int serve(int serv_sock, const char *dest)
+int serve(int serv_sock, const char *dest
+#ifdef ENABLE_REGEX
+        , struct regex *regexes
+#endif
+        )
 {
     size_t response_size;
     char *response_data = build_redirect(dest, &response_size);
@@ -402,6 +493,7 @@ int serve(int serv_sock, const char *dest)
                 int len = recv(s, buffer, RECV_BUFFER_SIZE, 0);
 
                 /* Decode HTTP request (really just wait for "\r\n\r\n") */
+                /* TODO : store URI and Host to match against regexes */
                 for(j = 0; j < len; ++j)
                 {
                     if(buffer[j] == '\r')
@@ -425,6 +517,7 @@ int serve(int serv_sock, const char *dest)
                         *state = 0;
                 }
                 if(*state == 4)
+                    /* TODO : match request against regexes */
                     /* Print redirect */
                     send(s, response_data, response_size, 0);
 
