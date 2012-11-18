@@ -28,7 +28,7 @@
 #endif
 
 #ifndef RECV_BUFFER_SIZE
-    #define RECV_BUFFER_SIZE 512
+    #define RECV_BUFFER_SIZE 1024
 #endif
 
 #include <stdio.h>
@@ -402,24 +402,58 @@ int setup_server(int *serv_sock, const char *addr, const char *port)
     return 0;
 }
 
-char *build_redirect(const char *dest, size_t *response_size)
+void send_redirect(int sock, const char *dest)
 {
-    const char *pattern =
+    send(
+            sock,
             "HTTP/1.1 301 Moved Permanently\r\n"
-            "Location: %s\r\n"
+            "Location: ",
+            42,
+            0);
+    send(sock, dest, strlen(dest), 0);
+    send(
+            sock,
+            "\r\n"
             "Server: http-redirect\r\n"
-            "\r\n";
-    char *response;
-    *response_size = strlen(pattern) - 2 + strlen(dest);
-    response = malloc(*response_size + 1);
-    snprintf(response, *response_size + 1, pattern, dest);
+            "\r\n",
+            27,
+            0);
+}
 
-    return response;
+void send_http_error(int sock)
+{
+    send(
+            sock,
+            "HTTP/1.1 400 Bad Request\r\n"
+            "Server: http-redirect\r\n"
+            "\r\n",
+            51,
+            0);
 }
 
 struct Client {
     int sock;
+#ifdef ENABLE_REGEX
+    char buffer[RECV_BUFFER_SIZE];
     int state;
+    /*    http request      host header       end
+     * 0 --------------> 1 --------------> 2 -----> 3
+     */
+    size_t bufsize;
+    char uri[RECV_BUFFER_SIZE];
+    char host[RECV_BUFFER_SIZE];
+#else
+    /* We don't actually read anything, we just wait for the end of the header
+     * to send the precomputed reply */
+    int state;
+    /* State machine:
+     *    \r      \n      \r      \n
+     * 0 ----> 1 ----> 2 ----> 3 ----> 4
+     *  \             ^ \             ^
+     *   \-----------/   \-----------/
+     *        \n              \n
+     */
+#endif
 };
 
 int serve(int serv_sock, const char *dest
@@ -428,9 +462,6 @@ int serve(int serv_sock, const char *dest
 #endif
         )
 {
-    size_t response_size;
-    char *response_data = build_redirect(dest, &response_size);
-
     struct Client *connections[MAX_PENDING_REQUESTS];
     size_t i;
     for(i = 0; i < MAX_PENDING_REQUESTS; ++i)
@@ -477,7 +508,14 @@ int serve(int serv_sock, const char *dest
                             break;
                     connections[i] = malloc(sizeof(struct Client));
                     connections[i]->sock = sock;
+#ifdef ENABLE_REGEX
                     connections[i]->state = 0;
+                    connections[i]->bufsize = 0;
+                    connections[i]->uri[0] = '\0';
+                    connections[i]->host[0] = '\0';
+#else
+                    connections[i]->state = 0;
+#endif
                 }
             }
         }
@@ -486,14 +524,127 @@ int serve(int serv_sock, const char *dest
             int s = connections[i]->sock;
             if(FD_ISSET(s, &fds))
             {
+                char done = 0;
+#ifdef ENABLE_REGEX
+                struct Client *const c = connections[i];
+                size_t j;
+                int len = recv(
+                        s,
+                        c->buffer + c->bufsize,
+                        RECV_BUFFER_SIZE - c->bufsize,
+                        0);
+                j = c->bufsize;
+                if(len <= 0)
+                    done = 1;
+                else
+                    c->bufsize += len;
+                while(j < c->bufsize && !done)
+                {
+                    if(c->buffer[j] == '\n')
+                    {
+                        size_t skip = 0;
+                        if(j > 0 && c->buffer[j-1] == '\r')
+                            c->buffer[j - 1] = '\0';
+                        else
+                            c->buffer[j] = '\0';
+                        if(strncmp(c->buffer, "GET ", skip = 4) == 0
+                        || strncmp(c->buffer, "POST ", skip = 5) == 0
+                        || strncmp(c->buffer, "HEAD ", skip = 5) == 0)
+                        {
+                            if(c->state != 0)
+                            {
+                                send_http_error(s);
+                                done = 1;
+                            }
+                            else
+                            {
+                                const char *uri_start = c->buffer + skip;
+                                const char *uri_end = strchr(uri_start, ' ');
+                                if(uri_end == NULL)
+                                {
+                                    send_http_error(s);
+                                    done = 1;
+                                }
+                                else
+                                {
+                                    size_t uri_len = uri_end - uri_start;
+                                    memcpy(c->uri, uri_start, uri_len);
+                                    c->uri[uri_len] = '\0';
+                                    c->state = 1;
+                                }
+                            }
+                        }
+                        else if(strncmp(c->buffer, "Host: ", 6) == 0)
+                        {
+                            if(c->state != 1)
+                            {
+                                send_http_error(s);
+                                done = 1;
+                            }
+                            else
+                            {
+                                strcpy(c->host, c->buffer + 6);
+                                c->state = 2;
+                            }
+                        }
+                        else if(c->buffer[0] == '\0') /* empty line */
+                        {
+                            if(c->state == 0)
+                            {
+                                send_http_error(s);
+                                done = 1;
+                            }
+                            else
+                                c->state = 3;
+                        }
+
+                        /* Remove the line we just read */
+                        ++j;
+                        c->bufsize = c->bufsize - j;
+                        {
+                            size_t i;
+                            for(i = 0; i < c->bufsize; ++i)
+                                c->buffer[i] = c->buffer[j + i];
+                        }
+                        j = 0;
+                    }
+                    else
+                       ++j;
+                }
+
+                if(c->state == 3)
+                {
+                    struct regex *r;
+                    char request[RECV_BUFFER_SIZE * 2];
+                    strcpy(request, c->host);
+                    strcat(request, c->uri);
+                    for(r = regexes; r != NULL; r = r->next)
+                    {
+                        fprintf(stderr, "regexec...\n");
+                        if(regexec(&r->preg, request, 0, NULL, 0) == 0)
+                        {
+                            /* Print redirect */
+                            send_redirect(s, r->dest);
+                            done = 1;
+                        }
+                    }
+                    if(!done)
+                        send_redirect(s, dest); /* default */
+                    done = 1;
+                }
+                else if(c->bufsize >= RECV_BUFFER_SIZE)
+                {
+                    /* Overflow */
+                    send_http_error(s);
+                    done = 1;
+                }
+#else
+                /* Just wait for "\r\n\r\n" */
                 int *const state = &connections[i]->state;
-                int j;
+                size_t j;
                 /* Read stuff */
                 static char buffer[RECV_BUFFER_SIZE];
                 int len = recv(s, buffer, RECV_BUFFER_SIZE, 0);
-
-                /* Decode HTTP request (really just wait for "\r\n\r\n") */
-                /* TODO : store URI and Host to match against regexes */
                 for(j = 0; j < len; ++j)
                 {
                     if(buffer[j] == '\r')
@@ -517,12 +668,15 @@ int serve(int serv_sock, const char *dest
                         *state = 0;
                 }
                 if(*state == 4)
-                    /* TODO : match request against regexes */
+                {
                     /* Print redirect */
-                    send(s, response_data, response_size, 0);
+                    send_redirect(s, dest);
+                    done = 1;
+                }
+#endif
 
                 /* Client closed the connection OR request complete */
-                if(len <= 0 || *state == 4)
+                if(len <= 0 || done)
                 {
                     my_closesocket(s);
                     free(connections[i]);
@@ -532,8 +686,6 @@ int serve(int serv_sock, const char *dest
             }
         }
     }
-
-    free(response_data);
 
     return 0;
 }
